@@ -53,8 +53,11 @@ import java.util.Comparator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Queue;
+import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+
+import static android.media.MediaCodecList.REGULAR_CODECS;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -207,17 +210,18 @@ public class MainActivity extends AppCompatActivity {
                 }
             };
 
-    private static final int MINIMUM_PREVIEW_SIZE = 320;
+    private static final int MINIMUM_PREVIEW_SIZE = 1944;
 
     // parameters for the video encoder
     private static final String MIME_TYPE = "video/avc";    // H.264 Advanced Video Coding
-    private static final int BIT_RATE = 2000000;            // 2Mbps
-    private static final int FRAME_RATE = 15;               // 15fps
-    private static final int IFRAME_INTERVAL = 10;          // 10 seconds between I-frames
-    private static final int WIDTH = 320;
-    private static final int HEIGHT = 240;
-    Queue<MyData> mQueue = new LinkedList<MyData>();
+    private static final int BIT_RATE = 1500000;            // 2Mbps
+    private static final int FRAME_RATE = 24;               // 15fps
+    private static final int IFRAME_INTERVAL = 4;          // 10 seconds between I-frames
+    private static final int WIDTH = 2592;
+    private static final int HEIGHT = 1944;
+    LinkedBlockingDeque<MyData> mQueue = new LinkedBlockingDeque<>();
     FileOutputStream fos;
+    MediaCodec codec;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -236,14 +240,15 @@ public class MainActivity extends AppCompatActivity {
             textureView.setSurfaceTextureListener(surfaceTextureListener);
         }
         try {
-            fos = new FileOutputStream(Environment.getExternalStorageDirectory()+ File.separator+"text.h264");
+            fos = new FileOutputStream(getApplicationContext().getFilesDir()+ File.separator+"test.mp4");
         } catch (FileNotFoundException e) {
             e.printStackTrace();
         }
         MediaFormat format = createMediaFormat();
         MediaCodecInfo mediaCodecInfo = selectCodec(MIME_TYPE);
 
-        MediaCodec codec = null;
+        Log.d("MainActivity", " testing codec selected "+mediaCodecInfo.getName());
+
         try {
             codec = MediaCodec.createByCodecName(mediaCodecInfo.getName());
         } catch (IOException e) {
@@ -251,13 +256,24 @@ public class MainActivity extends AppCompatActivity {
         }
         MediaFormat mOutputFormat; // member variable
 //        final MediaCodec finalCodec = codec;
+        codec.setOnFrameRenderedListener(new MediaCodec.OnFrameRenderedListener() {
+            @Override
+            public void onFrameRendered(@NonNull MediaCodec codec, long presentationTimeUs, long nanoTime) {
+                Log.d(TAG, "test onFrameRendered " + System.currentTimeMillis());
+            }
+        }, inferenceHandler);
         codec.setCallback(new MediaCodec.Callback() {
             @Override
             public void onInputBufferAvailable(MediaCodec mc, int inputBufferId) {
                 ByteBuffer inputBuffer = mc.getInputBuffer(inputBufferId);
-                Log.d(TAG, "onInputBufferAvailable: ");
+                Log.d(TAG, "test onInputBufferAvailable: "+mQueue.size()+" index "+inputBufferId);
                 // fill inputBuffer with valid data
-                MyData data = mQueue.poll();
+                MyData data = null;
+                try {
+                    data = mQueue.take();
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
                 if (data != null) {
                     // check if is EOS and process with EOS flag if is the case
                     // else if NOT EOS
@@ -273,19 +289,19 @@ public class MainActivity extends AppCompatActivity {
                                 0);
                     }
 
-                } else {
-
-                    mc.queueInputBuffer(inputBufferId,
-                            0,
-                            0,
-                            0,
-                            0);
                 }
+//                else {
+//                    mc.queueInputBuffer(inputBufferId,
+//                            0,
+//                            0,
+//                            0,
+//                            0);
+//                }
             }
 
             @Override
             public void onOutputBufferAvailable(@NonNull MediaCodec codec, int index, @NonNull MediaCodec.BufferInfo info) {
-                Log.d(TAG, "onOutputBufferAvailable: ");
+                Log.d(TAG, "test onOutputBufferAvailable: index "+index);
                 ByteBuffer outputBuffer = codec.getOutputBuffer(index);
                 byte[] outData = new byte[info.size];
                 if (outputBuffer != null) {
@@ -301,16 +317,15 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void onError(@NonNull MediaCodec codec, @NonNull MediaCodec.CodecException e) {
-
+                Log.e("MainActivity", "test codec error", e);
             }
 
             @Override
             public void onOutputFormatChanged(@NonNull MediaCodec codec, @NonNull MediaFormat format) {
-                Log.d(TAG, "onOutputFormatChanged: " + format.toString());
+                Log.d(TAG, "test onOutputFormatChanged: " + format.toString());
 
             }
-        });
-
+        }, inferenceHandler);
         codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
         mOutputFormat = codec.getOutputFormat(); // option B
         codec.start();
@@ -580,7 +595,7 @@ public class MainActivity extends AppCompatActivity {
                     image.getHeight());
             mQueue.add(new MyData(mBuffer, image.getTimestamp(), false));
             image.close();
-            Log.d("hehe", "onImageAvailable");
+            Log.d("hehe", "test onImageAvailable "+mQueue.size());
         }
     };
 
@@ -610,6 +625,14 @@ public class MainActivity extends AppCompatActivity {
             Log.d("hehe", "Couldn't find any suitable preview size");
             return choices[0];
         }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        codec.signalEndOfInputStream();
+        codec.stop();
+        codec.release();
     }
 
     /**
@@ -674,11 +697,13 @@ public class MainActivity extends AppCompatActivity {
      */
     private static MediaFormat createMediaFormat() {
         MediaFormat format = MediaFormat.createVideoFormat(MIME_TYPE, WIDTH, HEIGHT);
+        format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, WIDTH * HEIGHT * 4);
         format.setInteger(MediaFormat.KEY_COLOR_FORMAT,
                 MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible);
         format.setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE);
         format.setInteger(MediaFormat.KEY_FRAME_RATE, FRAME_RATE);
         format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, IFRAME_INTERVAL);
+        format.setInteger(MediaFormat.KEY_BITRATE_MODE, 2);
         return format;
     }
 
@@ -687,20 +712,24 @@ public class MainActivity extends AppCompatActivity {
      * match was found.
      */
     private static MediaCodecInfo selectCodec(String mimeType) {
-        int numCodecs = MediaCodecList.getCodecCount();
-        for (int i = 0; i < numCodecs; i++) {
-            MediaCodecInfo codecInfo = MediaCodecList.getCodecInfoAt(i);
-            if (!codecInfo.isEncoder()) {
+        MediaCodecInfo[] infos = new MediaCodecList(REGULAR_CODECS).getCodecInfos();
+
+        List<MediaCodecInfo> supported = new ArrayList<>();
+
+        for(MediaCodecInfo info: infos) {
+            if (!info.isEncoder()) {
                 continue;
             }
-            String[] types = codecInfo.getSupportedTypes();
+            String[] types = info.getSupportedTypes();
             for (int j = 0; j < types.length; j++) {
                 if (types[j].equalsIgnoreCase(mimeType)) {
-                    return codecInfo;
+                    supported.add(info);
                 }
             }
         }
-        return null;
+
+        if (supported.isEmpty()) return null;
+        return supported.get(0);
     }
     public native byte[] yuvToBuffer(ByteBuffer y, ByteBuffer u, ByteBuffer v, int yPixelStride, int yRowStride,
                                      int uPixelStride, int uRowStride, int vPixelStride, int vRowStride, int imgWidth, int imgHeight);
